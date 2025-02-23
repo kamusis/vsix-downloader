@@ -160,6 +160,7 @@ class ConsoleLogger(BaseLogger):
                    and values should be color names (cyan, green, etc.)
         """
         self.show_caller_info = show_caller_info
+        self.level = LogLevel.INFO  # Default level
         
         # Convert color names to ANSI codes
         self.color_map = {}
@@ -196,6 +197,22 @@ class ConsoleLogger(BaseLogger):
             if level not in self.color_map:
                 self.color_map[level] = color
     
+    def set_level(self, level: Union[str, LogLevel]) -> None:
+        """
+        Set the minimum logging level.
+        
+        Args:
+            level: Logging level as string ('DEBUG', 'INFO', etc.) or LogLevel enum
+        """
+        if isinstance(level, str):
+            try:
+                self.level = LogLevel[level.upper()]
+            except KeyError:
+                print(f"Invalid log level: {level}. Using INFO.")
+                self.level = LogLevel.INFO
+        else:
+            self.level = level
+
     def _log(self, level: LogLevel, message: Any, timestamp: bool = True) -> None:
         """
         Internal method to handle logging with colors and caller info.
@@ -205,6 +222,10 @@ class ConsoleLogger(BaseLogger):
             message: The message to log
             timestamp: Whether to include a timestamp
         """
+        # Check if this message should be logged
+        if level.value < self.level.value:
+            return
+            
         base_message = self._format_message(level, message, timestamp)
         
         if self.show_caller_info:
