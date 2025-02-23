@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .venv*/
+.venv-mac/
 
 # IDE
 .idea/
