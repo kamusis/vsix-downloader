@@ -9,10 +9,13 @@ marketplace by using the marketplace API to search for and download extensions.
 import argparse
 import os
 import sys
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from log_utils import ConsoleLogger
+import math
+from datetime import datetime
+from tqdm import tqdm
 
 class VSIXDownloader:
     """Main class for handling VSIX file downloads from VS Code marketplace."""
@@ -91,7 +94,65 @@ class VSIXDownloader:
         
         return base_flags
     
-    def _extract_from_search(self, extension_name: str) -> Dict:
+    def _score_extension(self, extension: Dict[str, Any], search_term: str) -> float:
+        """
+        Score an extension based on various factors.
+        
+        Args:
+            extension: Extension data from API
+            search_term: Original search term
+            
+        Returns:
+            Score value (higher is better)
+        """
+        score = 0.0
+        
+        # 1. Name matching (max: 40 points)
+        name = extension.get("extensionName", "").lower()
+        display_name = extension.get("displayName", "").lower()
+        search_term = search_term.lower()
+        
+        # Exact match gets highest score
+        if search_term == name or search_term == display_name:
+            score += 40
+        # Contains as whole word
+        elif f" {search_term} " in f" {name} " or f" {search_term} " in f" {display_name} ":
+            score += 30
+        # Contains as part
+        elif search_term in name or search_term in display_name:
+            score += 20
+            
+        # 2. Install count (max: 30 points)
+        statistics = {stat["statisticName"]: stat["value"] 
+                     for stat in extension.get("statistics", [])}
+        install_count = int(statistics.get("install", 0))
+        # Log scale for install count (0 to 30 points)
+        if install_count > 0:
+            score += min(30, math.log(install_count, 10) * 3)
+            
+        # 3. Ratings (max: 20 points)
+        weighted_rating = float(statistics.get("weightedRating", 0))
+        rating_count = int(statistics.get("ratingCount", 0))
+        # Combine rating value and count
+        if rating_count > 0:
+            rating_score = (weighted_rating / 5) * min(1, math.log(rating_count + 1, 100))
+            score += min(20, rating_score * 20)  # Scale to max 20 points
+            
+        # 4. Last updated (max: 10 points)
+        last_updated = extension.get("lastUpdated", "")
+        if last_updated:
+            try:
+                # Parse date like "2024-02-23T12:00:00.000Z"
+                updated_date = datetime.strptime(last_updated.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                days_old = (datetime.now() - updated_date).days
+                # Newer updates get more points (max 10 points, decreasing with age)
+                score += max(0, 10 - min(10, days_old / 30))
+            except (ValueError, TypeError):
+                pass
+                
+        return score
+
+    def _extract_from_search(self, extension_name: str) -> Tuple[Dict[str, Any], float]:
         """
         Search for extension and extract information from search results.
         
@@ -99,19 +160,22 @@ class VSIXDownloader:
             extension_name: Name of the extension to search for
             
         Returns:
-            Dictionary containing extension information including:
-            - publisher_name: Publisher name
-            - extension_id: Extension ID
-            - version: Version number
-            - display_name: Display name of the extension
-            - short_description: Short description
-            - install_count: Number of installations
-            - rating: Average rating
-            - rating_count: Number of ratings
+            Tuple containing:
+            - Dictionary with extension information including:
+              - publisher_name: Publisher name
+              - extension_id: Extension ID
+              - version: Version number
+              - display_name: Display name of the extension
+              - short_description: Short description
+              - install_count: Number of installations
+              - rating: Average rating
+              - rating_count: Number of ratings
+            - Score value indicating the relevance (0-100)
             
         Raises:
             ValueError: If extension cannot be found
             requests.RequestException: If network request fails
+            KeyboardInterrupt: If user cancels the selection
         """
         self.logger.debug(f"Searching marketplace API for: {extension_name}")
         
@@ -142,38 +206,57 @@ class VSIXDownloader:
         if not extensions:
             raise ValueError(f"No extensions found matching: {extension_name}")
             
-        extension = extensions[0]
-        statistics = {stat["statisticName"]: stat["value"] 
-                     for stat in extension.get("statistics", [])}
+        # Score and sort extensions
+        scored_extensions = [
+            (self._score_extension(ext, extension_name), ext)
+            for ext in extensions
+        ]
+        scored_extensions.sort(reverse=True)  # Sort by score descending
         
-        # Format install count with commas
-        install_count = int(statistics.get("install", 0))
-        formatted_install_count = "{:,}".format(install_count)
+        total_results = len(extensions)
+        print(f"\nFound {total_results} matching extensions (showing top 5 by relevance score)")
+        print("Scoring is based on: name matching (40%), downloads (30%), ratings (20%), and update frequency (10%)")
         
-        # Format rating
-        weighted_rating = float(statistics.get("weightedRating", 0))
-        rating = round(weighted_rating / 5, 2) if weighted_rating else 0
-        rating_count = int(statistics.get("ratingcount", 0))
+        # Take top 5 results
+        top_extensions = scored_extensions[:5]
         
-        extension_info = {
-            "publisher_name": extension["publisher"]["publisherName"],
-            "extension_id": extension["extensionName"],
-            "version": extension["versions"][0]["version"],
-            "display_name": extension.get("displayName", extension["extensionName"]),
-            "short_description": extension.get("shortDescription", ""),
-            "install_count": formatted_install_count,
-            "rating": rating,
-            "rating_count": rating_count
-        }
-        
-        # Log extension statistics
-        self.logger.info(f"Extension install count: {extension_info['install_count']}")
-        self.logger.info(f"Extension rating: {extension_info['rating']}")
-        self.logger.info(f"Number of ratings: {extension_info['rating_count']}")
-        
-        return extension_info
-    
-    def extract_extension_info(self, extension_name: str) -> Dict:
+        # If multiple extensions found, let user choose
+        if len(top_extensions) > 1:
+            print("\nTop matching extensions:")
+            for i, (score, ext) in enumerate(top_extensions, 1):
+                publisher = ext["publisher"]["publisherName"]
+                display_name = ext.get("displayName", ext["extensionName"])
+                short_desc = ext.get("shortDescription", "")[:100] + "..." if ext.get("shortDescription", "") else ""
+                stats = {stat["statisticName"]: stat["value"] 
+                        for stat in ext.get("statistics", [])}
+                install_count = int(stats.get("install", 0))
+                rating = float(stats.get("weightedRating", 0))
+                rating_count = int(stats.get("ratingCount", 0))
+                
+                print(f"\n{i}. {display_name} by {publisher}")
+                print(f"   Relevance score: {score:.1f}/100")
+                print(f"   Downloads: {install_count:,}")
+                print(f"   Rating: {rating:.1f} ({rating_count:,} ratings)")
+                print(f"   {short_desc}")
+            
+            print("\nEnter a number to select an extension, or 'c' to cancel.")
+            while True:
+                try:
+                    choice = input(f"\nPlease choose an extension (1-{len(top_extensions)}) or 'c' to cancel [1]: ").lower()
+                    if choice == 'c':
+                        raise KeyboardInterrupt("User cancelled extension selection")
+                    if not choice:  # Default to first option
+                        choice = "1"
+                    choice_idx = int(choice) - 1
+                    if 0 <= choice_idx < len(top_extensions):
+                        return top_extensions[choice_idx]  # Return (score, extension) tuple
+                    print(f"Please enter a number between 1 and {len(top_extensions)} or 'c' to cancel")
+                except ValueError:
+                    print("Please enter a valid number or 'c' to cancel")
+        else:
+            return top_extensions[0]  # Return (score, extension) tuple
+
+    def extract_extension_info(self, extension_name: str) -> Dict[str, Any]:
         """
         Search for and extract extension information from the marketplace.
         
@@ -187,7 +270,33 @@ class VSIXDownloader:
             ValueError: If extension cannot be found or information cannot be extracted
             requests.RequestException: If network request fails
         """
-        return self._extract_from_search(extension_name)
+        score, extension = self._extract_from_search(extension_name)
+        
+        statistics = {stat["statisticName"]: stat["value"] 
+                     for stat in extension.get("statistics", [])}
+        
+        # Format install count with commas
+        install_count = int(statistics.get("install", 0))
+        formatted_install_count = "{:,}".format(install_count)
+        
+        # Format rating
+        weighted_rating = float(statistics.get("weightedRating", 0))
+        rating = round(weighted_rating / 5, 2) if weighted_rating else 0
+        rating_count = int(statistics.get("ratingCount", 0))
+        
+        extension_info = {
+            "publisher_name": extension["publisher"]["publisherName"],
+            "extension_id": extension["extensionName"],
+            "version": extension.get("versions", [{}])[0].get("version", "Unknown"),
+            "display_name": extension.get("displayName", extension["extensionName"]),
+            "short_description": extension.get("shortDescription", ""),
+            "install_count": formatted_install_count,
+            "rating": rating,
+            "rating_count": rating_count,
+            "relevance_score": score
+        }
+        
+        return extension_info
     
     def construct_download_url(self, publisher: str, extension_id: str, version: str) -> str:
         """
@@ -219,45 +328,60 @@ class VSIXDownloader:
             requests.RequestException: If download fails
             OSError: If output directory cannot be created/accessed
         """
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-        
         # Get extension info
         extension_info = self.extract_extension_info(extension_name)
         
-        # Construct download URL
-        download_url = self.construct_download_url(extension_info['publisher_name'], extension_info['extension_id'], extension_info['version'])
+        # Display extension information and ask for confirmation
+        print(f"\nExtension Details:")
+        print(f"  Name: {extension_info['display_name']}")
+        print(f"  Publisher: {extension_info['publisher_name']}")
+        print(f"  Version: {extension_info['version']}")
+        print(f"  Downloads: {extension_info['install_count']}")
+        print(f"  Rating: {extension_info['rating']} ({extension_info['rating_count']} ratings)")
+        print(f"  Relevance Score: {extension_info['relevance_score']:.1f}/100")
         
-        # Construct output filename
-        output_file = os.path.join(output_dir, f"{extension_info['publisher_name']}.{extension_info['extension_id']}-{extension_info['version']}.vsix")
+        print("\nDo you want to download this extension? [Y/n]: ", end='')
+        choice = input().lower()
+        if choice in ['n', 'no']:
+            self.logger.info("Download cancelled by user")
+            raise KeyboardInterrupt("User cancelled download")
+            
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Construct download URL
+        download_url = self.construct_download_url(
+            extension_info["publisher_name"],
+            extension_info["extension_id"],
+            extension_info["version"]
+        )
         
         # Download the file
-        self.logger.info(f"Downloading extension from: {download_url}")
-        self.logger.info(f"Saving to: {output_file}")
-        
+        self.logger.info(f"Downloading from: {download_url}")
         response = self.session.get(download_url, stream=True)
         response.raise_for_status()
         
-        # Get total file size for progress tracking
-        total_size = int(response.headers.get('content-length', 0))
+        # Construct filename from extension info
+        filename = f"{extension_info['publisher_name']}.{extension_info['extension_id']}-{extension_info['version']}.vsix"
+        output_path = os.path.join(output_dir, filename)
         
-        # Download with progress tracking
-        with open(output_file, 'wb') as f:
-            if total_size == 0:
-                self.logger.warning("Could not determine file size, downloading without progress tracking")
-                f.write(response.content)
-            else:
-                downloaded = 0
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        progress = (downloaded / total_size) * 100
-                        if downloaded % (1024 * 1024) == 0:  # Log every 1MB
-                            self.logger.info(f"Download progress: {progress:.1f}% ({downloaded/1024/1024:.1f}MB/{total_size/1024/1024:.1f}MB)")
+        # Save the file with progress bar
+        file_size = int(response.headers.get('Content-Length', 0))
+        chunk_size = 1024  # 1 KB
         
-        self.logger.info(f"Download completed: {output_file}")
-        return output_file
+        with open(output_path, 'wb') as f, tqdm(
+            desc=f"Downloading {filename}",
+            total=file_size,
+            unit='iB',
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as pbar:
+            for data in response.iter_content(chunk_size=chunk_size):
+                size = f.write(data)
+                pbar.update(size)
+        
+        self.logger.info(f"Downloaded to: {output_path}")
+        return output_path
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -297,7 +421,10 @@ def main():
         extension_name = args.extension_name
         if not extension_name:
             while True:
-                extension_name = input("\nEnter the name of the VS Code extension to download: ").strip()
+                extension_name = input("\nEnter the name of the VS Code extension to download (or 'c' to cancel): ").strip().lower()
+                if extension_name == 'c':
+                    print("Operation cancelled.")
+                    return
                 if extension_name:
                     break
                 print("Please enter a valid extension name.")
@@ -305,41 +432,39 @@ def main():
         # Create downloader instance
         downloader = VSIXDownloader(logger)
         
-        # Search for extension and get information
-        extension_info = downloader.extract_extension_info(extension_name)
-        
-        # Display extension information
-        print("\nFound Extension:")
-        print(f"Name: {extension_info['display_name']}")
-        print(f"Publisher: {extension_info['publisher_name']}")
-        print(f"Version: {extension_info['version']}")
-        print(f"Description: {extension_info['short_description']}")
-        print(f"Install Count: {extension_info['install_count']}")
-        print(f"Rating: {extension_info['rating']} ({extension_info['rating_count']} ratings)")
-        
-        # Ask for confirmation
-        while True:
-            response = input("\nDo you want to download this extension? [Y/n]: ").lower()
-            if not response:  # 如果用户直接回车
-                response = 'y'
-            if response in ['y', 'n']:
-                break
-            print("Please enter 'y' for yes or 'n' for no (or press Enter for yes).")
-        
-        if response == 'n':
-            print("Download cancelled.")
-            return
-        
-        # Download the extension
-        file_path = downloader.download_extension(
-            extension_name,
-            args.output_dir
-        )
-        print(f"\nExtension downloaded successfully to: {file_path}")
-        
+        try:
+            # Download the extension
+            output_file = downloader.download_extension(extension_name, args.output_dir)
+            print(f"\nExtension downloaded successfully to: {output_file}")
+        except KeyboardInterrupt as e:
+            if str(e) == "User cancelled extension selection":
+                print("\nOperation cancelled.")
+                return
+            if str(e) == "User cancelled download":
+                print("\nDownload cancelled.")
+                return
+            raise
+        except ValueError as e:
+            print(f"\nError: {e}")
+            return 1
+        except requests.RequestException as e:
+            print(f"\nNetwork error: {e}")
+            return 1
+        except OSError as e:
+            print(f"\nFile system error: {e}")
+            return 1
+        except Exception as e:
+            print(f"\nUnexpected error: {e}")
+            return 1
+            
+    except KeyboardInterrupt:
+        print("\nOperation cancelled.")
+        return 1
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        sys.exit(1)
+        print(f"\nUnexpected error: {e}")
+        return 1
+        
+    return 0
 
 if __name__ == "__main__":
     main()
