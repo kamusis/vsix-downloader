@@ -266,6 +266,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "extension_name",
+        nargs='?',  # Make it optional
         help="Name of the extension to download"
     )
     parser.add_argument(
@@ -292,11 +293,20 @@ def main():
         # Create output directory if it doesn't exist
         os.makedirs(args.output_dir, exist_ok=True)
         
+        # Get extension name from argument or prompt user
+        extension_name = args.extension_name
+        if not extension_name:
+            while True:
+                extension_name = input("\nEnter the name of the VS Code extension to download: ").strip()
+                if extension_name:
+                    break
+                print("Please enter a valid extension name.")
+        
         # Create downloader instance
         downloader = VSIXDownloader(logger)
         
         # Search for extension and get information
-        extension_info = downloader.extract_extension_info(args.extension_name)
+        extension_info = downloader.extract_extension_info(extension_name)
         
         # Display extension information
         print("\nFound Extension:")
@@ -309,10 +319,12 @@ def main():
         
         # Ask for confirmation
         while True:
-            response = input("\nDo you want to download this extension? (y/n): ").lower()
+            response = input("\nDo you want to download this extension? [Y/n]: ").lower()
+            if not response:  # 如果用户直接回车
+                response = 'y'
             if response in ['y', 'n']:
                 break
-            print("Please enter 'y' for yes or 'n' for no.")
+            print("Please enter 'y' for yes or 'n' for no (or press Enter for yes).")
         
         if response == 'n':
             print("Download cancelled.")
@@ -320,7 +332,7 @@ def main():
         
         # Download the extension
         file_path = downloader.download_extension(
-            args.extension_name,
+            extension_name,
             args.output_dir
         )
         print(f"\nExtension downloaded successfully to: {file_path}")

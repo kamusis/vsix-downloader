@@ -5,8 +5,14 @@ A command-line tool to download VS Code extensions from the marketplace.
 ## Features
 
 - Search for extensions by name
+- Show detailed extension information:
+  - Display name and publisher
+  - Version number
+  - Description
+  - Installation count
+  - Rating and number of ratings
+- Interactive mode for extension name input
 - Download VSIX files directly from the VS Code Marketplace
-- Show extension statistics (install count, ratings)
 - Progress tracking for downloads
 - Automatic retry on network errors
 
@@ -20,12 +26,18 @@ A command-line tool to download VS Code extensions from the marketplace.
 
 ## Usage
 
-Basic usage:
+### Interactive Mode
+Simply run without any arguments:
 ```bash
-python vsix_downloader.py <extension_name>
+python vsix_downloader.py
 ```
+The tool will prompt you to:
+1. Enter the extension name
+2. Review extension details
+3. Confirm download (press Enter or 'y' to proceed, 'n' to cancel)
 
-Example:
+### Command Line Mode
+Directly specify the extension name:
 ```bash
 python vsix_downloader.py gitlens
 ```
@@ -33,12 +45,14 @@ python vsix_downloader.py gitlens
 ### Options
 
 - `-o, --output-dir`: Specify output directory (default: current directory)
-- `-v, --verbose`: Enable verbose output
+  ```bash
+  python vsix_downloader.py gitlens -o downloads/
+  ```
 
-Example with options:
-```bash
-python vsix_downloader.py gitlens -o downloads/ -v
-```
+- `-v, --verbose`: Enable verbose output
+  ```bash
+  python vsix_downloader.py gitlens -v
+  ```
 
 The downloaded file will be named in the format:
 `{publisher}.{extension_id}-{version}.vsix`
