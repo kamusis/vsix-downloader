@@ -1,0 +1,2 @@
+# Core dependencies
+requests>=2.31.0  # HTTP requests with retry support
