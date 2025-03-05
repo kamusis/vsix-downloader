@@ -78,11 +78,10 @@ if __name__ == "__main__":
 ## Dependencies
 - [x] Add requirements.txt
   - Add requests
-  - Add beautifulsoup4
   - Add argparse
 
 ## Additional Features
 - [x] Add version check
 - [x] Add help documentation
 - [x] Add unit tests
-- [x] Add CI/CD pipeline
+- [] Add CI/CD pipeline

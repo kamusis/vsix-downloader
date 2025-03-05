@@ -1,2 +1,6 @@
 # Core dependencies
-requests>=2.31.0  # HTTP requests with retry support
+requests>=2.31.0    # HTTP requests with retry support
+tqdm>=4.66.1        # Progress bar for downloads
+
+# Optional dependencies
+# pytest>=7.0.0     # For running tests

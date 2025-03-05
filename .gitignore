@@ -38,3 +38,4 @@ ENV/
 *.vsix
 search_result.json
 downloads/
+CLAUDE.md

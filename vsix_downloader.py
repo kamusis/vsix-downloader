@@ -60,6 +60,13 @@ class VSIXDownloader:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         
+        # Enable SSL verification
+        self.session.verify = True
+        
+        # Set default timeouts
+        self.default_timeout = 30  # 30 seconds for regular requests
+        self.download_timeout = 120  # 2 minutes for downloads
+        
         # Set a user agent to avoid potential blocking
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -125,10 +132,19 @@ class VSIXDownloader:
         # 2. Install count (max: 30 points)
         statistics = {stat["statisticName"]: stat["value"] 
                      for stat in extension.get("statistics", [])}
-        install_count = int(statistics.get("install", 0))
+        try:
+            # Handle extremely large values and potential overflow
+            install_count = min(int(statistics.get("install", 0)), 1_000_000_000)  # Cap at 1 billion
+        except (ValueError, TypeError):
+            install_count = 0
+            
         # Log scale for install count (0 to 30 points)
         if install_count > 0:
-            score += min(30, math.log(install_count, 10) * 3)
+            try:
+                score += min(30, math.log(install_count, 10) * 3)
+            except (ValueError, OverflowError):
+                # Fallback if math calculation fails
+                score += 30  # Assume maximum for extremely large values
             
         # 3. Ratings (max: 20 points)
         weighted_rating = float(statistics.get("weightedRating", 0))
@@ -142,12 +158,36 @@ class VSIXDownloader:
         last_updated = extension.get("lastUpdated", "")
         if last_updated:
             try:
-                # Parse date like "2024-02-23T12:00:00.000Z"
-                updated_date = datetime.strptime(last_updated.split(".")[0], "%Y-%m-%dT%H:%M:%S")
-                days_old = (datetime.now() - updated_date).days
+                # Handle different date formats
+                if "." in last_updated:
+                    # Parse date like "2024-02-23T12:00:00.000Z"
+                    parts = last_updated.split(".")
+                    if len(parts) >= 1:
+                        date_part = parts[0]
+                        # Try various formats
+                        if "T" in date_part:
+                            try:
+                                updated_date = datetime.strptime(date_part, "%Y-%m-%dT%H:%M:%S")
+                            except ValueError:
+                                updated_date = datetime.strptime(date_part, "%Y-%m-%d")
+                        else:
+                            updated_date = datetime.strptime(date_part, "%Y-%m-%d")
+                else:
+                    # Try to parse without milliseconds
+                    updated_date = datetime.strptime(last_updated, "%Y-%m-%d")
+                
+                # Calculate age in days with bounds checking
+                current_date = datetime.now()
+                if updated_date > current_date:  # Future date
+                    days_old = 0
+                else:
+                    days_old = (current_date - updated_date).days
+                
                 # Newer updates get more points (max 10 points, decreasing with age)
                 score += max(0, 10 - min(10, days_old / 30))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError, OverflowError) as e:
+                # Better error logging for debugging
+                self.logger.debug(f"Error parsing date '{last_updated}': {e}")
                 pass
                 
         return score
@@ -195,16 +235,21 @@ class VSIXDownloader:
             "flags": self._get_api_flags('search')
         }
         
-        response = self.session.post(url, json=data)
-        response.raise_for_status()
-        
-        results = response.json()
-        if not results.get("results"):
-            raise ValueError(f"No extensions found matching: {extension_name}")
+        try:
+            response = self.session.post(url, json=data, timeout=self.default_timeout)
+            response.raise_for_status()
             
-        extensions = results["results"][0].get("extensions", [])
-        if not extensions:
-            raise ValueError(f"No extensions found matching: {extension_name}")
+            results = response.json()
+            if not results.get("results"):
+                raise ValueError(f"No extensions found matching: {extension_name}")
+                
+            extensions = results["results"][0].get("extensions", [])
+            if not extensions:
+                raise ValueError(f"No extensions found matching: {extension_name}")
+        except requests.exceptions.Timeout:
+            raise ValueError(f"Request timed out while searching for: {extension_name}")
+        except requests.exceptions.RequestException as e:
+            raise ValueError(f"Network error while searching for {extension_name}: {e}")
             
         # Score and sort extensions
         scored_extensions = [
@@ -242,15 +287,20 @@ class VSIXDownloader:
             print("\nEnter a number to select an extension, or 'c' to cancel.")
             while True:
                 try:
-                    choice = input(f"\nPlease choose an extension (1-{len(top_extensions)}) or 'c' to cancel [1]: ").lower()
-                    if choice == 'c':
-                        raise KeyboardInterrupt("User cancelled extension selection")
-                    if not choice:  # Default to first option
-                        choice = "1"
-                    choice_idx = int(choice) - 1
-                    if 0 <= choice_idx < len(top_extensions):
-                        return top_extensions[choice_idx]  # Return (score, extension) tuple
-                    print(f"Please enter a number between 1 and {len(top_extensions)} or 'c' to cancel")
+                    try:
+                        choice = input(f"\nPlease choose an extension (1-{len(top_extensions)}) or 'c' to cancel [1]: ").lower()
+                        if choice == 'c':
+                            raise KeyboardInterrupt("User cancelled extension selection")
+                        if not choice:  # Default to first option
+                            choice = "1"
+                        choice_idx = int(choice) - 1
+                        if 0 <= choice_idx < len(top_extensions):
+                            return top_extensions[choice_idx]  # Return (score, extension) tuple
+                        print(f"Please enter a number between 1 and {len(top_extensions)} or 'c' to cancel")
+                    except EOFError:
+                        # Handle case where stdin is not available (e.g. in CI/CD or automated testing)
+                        self.logger.info("Non-interactive environment detected, defaulting to first option")
+                        return top_extensions[0]  # Default to first option
                 except ValueError:
                     print("Please enter a valid number or 'c' to cancel")
         else:
@@ -287,7 +337,7 @@ class VSIXDownloader:
         extension_info = {
             "publisher_name": extension["publisher"]["publisherName"],
             "extension_id": extension["extensionName"],
-            "version": extension.get("versions", [{}])[0].get("version", "Unknown"),
+            "version": extension.get("versions", [{}])[0].get("version", "Unknown") if extension.get("versions") else "Unknown",
             "display_name": extension.get("displayName", extension["extensionName"]),
             "short_description": extension.get("shortDescription", ""),
             "install_count": formatted_install_count,
@@ -324,10 +374,34 @@ class VSIXDownloader:
             Path to the downloaded file
             
         Raises:
-            ValueError: If extension cannot be found
+            ValueError: If extension cannot be found or input is invalid
             requests.RequestException: If download fails
             OSError: If output directory cannot be created/accessed
+            KeyboardInterrupt: If user cancels the download
         """
+        # Validate inputs
+        if not extension_name:
+            raise ValueError("Extension name cannot be empty")
+        
+        # Validate and sanitize extension name for security
+        import re
+        if not re.match(r'^[a-zA-Z0-9.\-_\s]+$', extension_name):
+            raise ValueError("Extension name contains invalid characters")
+        
+        # Validate output directory
+        if not output_dir:
+            raise ValueError("Output directory cannot be empty")
+        
+        # Create output directory if it doesn't exist
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            raise OSError(f"Cannot create output directory: {e}")
+            
+        # Check write permissions
+        if not os.access(output_dir, os.W_OK):
+            raise PermissionError(f"No write permission for directory: {output_dir}")
+        
         # Get extension info
         extension_info = self.extract_extension_info(extension_name)
         
@@ -341,12 +415,17 @@ class VSIXDownloader:
         print(f"  Relevance Score: {extension_info['relevance_score']:.1f}/100")
         
         print("\nDo you want to download this extension? [Y/n]: ", end='')
-        choice = input().lower()
-        if choice in ['n', 'no']:
-            self.logger.info("Download cancelled by user")
-            raise KeyboardInterrupt("User cancelled download")
+        try:
+            choice = input().lower()
+            if choice in ['n', 'no']:
+                self.logger.info("Download cancelled by user")
+                raise KeyboardInterrupt("User cancelled download")
+        except EOFError:
+            # Handle case where we're in a non-interactive environment
+            self.logger.info("Non-interactive environment detected, proceeding with download")
+            print("Y (auto-selected in non-interactive mode)")  # Show what action was taken
             
-        # Create output directory if it doesn't exist
+        # Use the validated output directory
         os.makedirs(output_dir, exist_ok=True)
         
         # Construct download URL
@@ -358,30 +437,58 @@ class VSIXDownloader:
         
         # Download the file
         self.logger.info(f"Downloading from: {download_url}")
-        response = self.session.get(download_url, stream=True)
-        response.raise_for_status()
-        
-        # Construct filename from extension info
-        filename = f"{extension_info['publisher_name']}.{extension_info['extension_id']}-{extension_info['version']}.vsix"
-        output_path = os.path.join(output_dir, filename)
-        
-        # Save the file with progress bar
-        file_size = int(response.headers.get('Content-Length', 0))
-        chunk_size = 1024  # 1 KB
-        
-        with open(output_path, 'wb') as f, tqdm(
-            desc=f"Downloading {filename}",
-            total=file_size,
-            unit='iB',
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as pbar:
-            for data in response.iter_content(chunk_size=chunk_size):
-                size = f.write(data)
-                pbar.update(size)
+        try:
+            response = self.session.get(download_url, stream=True, timeout=self.download_timeout)
+            response.raise_for_status()
+            
+            # Construct filename from extension info
+            filename = f"{extension_info['publisher_name']}.{extension_info['extension_id']}-{extension_info['version']}.vsix"
+            output_path = os.path.join(output_dir, filename)
+            
+            # Save the file with progress bar
+            file_size = int(response.headers.get('Content-Length', 0))
+            chunk_size = 1024  # 1 KB
+            
+            try:
+                with open(output_path, 'wb') as f, tqdm(
+                    desc=f"Downloading {filename}",
+                    total=file_size,
+                    unit='iB',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                ) as pbar:
+                    for data in response.iter_content(chunk_size=chunk_size):
+                        size = f.write(data)
+                        pbar.update(size)
+                        
+                # Verify file was downloaded correctly
+                if os.path.getsize(output_path) == 0:
+                    raise ValueError(f"Downloaded file is empty: {output_path}")
+                    
+            except (IOError, OSError) as e:
+                # Clean up partial downloads on error
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                    except:
+                        pass
+                raise OSError(f"Failed to write file {output_path}: {e}")
+                
+        except requests.exceptions.Timeout:
+            raise ValueError(f"Download timed out for extension: {extension_info['display_name']}")
+        except requests.exceptions.RequestException as e:
+            raise ValueError(f"Network error during download: {e}")
         
         self.logger.info(f"Downloaded to: {output_path}")
         return output_path
+
+    def __del__(self):
+        """Clean up resources when the object is garbage collected."""
+        if hasattr(self, 'session'):
+            try:
+                self.session.close()
+            except:
+                pass
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""

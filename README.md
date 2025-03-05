@@ -2,6 +2,9 @@
 
 A command-line tool to download VS Code extensions from the marketplace.
 
+[![Version 1.1.0](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/kamusis/vsix-downloader)
+[![Python 3.6+](https://img.shields.io/badge/python-3.6+-green.svg)](https://www.python.org/downloads/)
+
 ## Features
 
 - Smart extension search with relevance scoring:
@@ -93,12 +96,31 @@ Only the top 5 scored extensions are displayed to avoid information overload.
 ## Error Handling
 
 The tool includes robust error handling for:
-- Network connection issues (with automatic retry)
-- Invalid extension names
-- Missing output directory (automatically created)
-- API response errors
+- Network connection issues (with automatic retry and timeouts)
+- Invalid extension names (with input validation)
+- Directory issues (permission checks, automatic creation)
+- API response errors (with detailed error messages)
 - User cancellation (during selection or download)
+- File system errors (with proper cleanup of partial downloads)
+- Non-interactive environments (auto-selection of best matches)
+
+## Automated Usage
+
+The tool can be used in scripts and automated environments:
+```bash
+# Will automatically select the best match without user interaction
+python vsix_downloader.py <extension_name> -o <output_dir>
+```
+
+## Security
+
+- Validates all user inputs
+- Verifies SSL certificates
+- Prevents directory traversal
+- Performs permission checks before writes
+- Cleans up partial downloads on errors
 
 ## Note
 
-This tool uses the official VS Code Marketplace API to search for and download extensions.
+This tool uses the official VS Code Marketplace API to search for and download extensions. 
+See the [CHANGELOG.md](CHANGELOG.md) for details of the latest improvements.

@@ -85,11 +85,33 @@ class BaseLogger(ABC):
         Returns:
             Dict containing 'function' and 'line' information
         """
-        caller_frame = inspect.currentframe().f_back.f_back  # Skip _get_caller_info and log method frames
-        return {
-            'function': caller_frame.f_code.co_name,
-            'line': str(caller_frame.f_lineno)
-        }
+        try:
+            current_frame = inspect.currentframe()
+            if current_frame is None:
+                return {'function': 'unknown', 'line': '0'}
+                
+            back_frame = current_frame.f_back
+            if back_frame is None:
+                return {'function': 'unknown', 'line': '0'}
+                
+            caller_frame = back_frame.f_back  # Skip _get_caller_info and log method frames
+            if caller_frame is None:
+                return {'function': 'unknown', 'line': '0'}
+                
+            return {
+                'function': caller_frame.f_code.co_name,
+                'line': str(caller_frame.f_lineno)
+            }
+        except Exception:
+            return {'function': 'unknown', 'line': '0'}
+        finally:
+            # Clean up references to frames to avoid reference cycles
+            if 'current_frame' in locals():
+                del current_frame
+            if 'back_frame' in locals():
+                del back_frame
+            if 'caller_frame' in locals():
+                del caller_frame
 
 class DebugLogger(BaseLogger):
     """
@@ -311,31 +333,38 @@ class CompositeLogger(BaseLogger):
             message: Message to log
             timestamp: Whether to include timestamp
         """
+        # Hold the lock for the entire operation to ensure thread safety
         with self.lock:
-            loggers = self.loggers.copy()  # Copy to avoid modification during iteration
-        
-        failed_loggers = []
-        for logger in loggers:
-            try:
-                if level == LogLevel.DEBUG:
-                    logger.debug(message, timestamp)
-                elif level == LogLevel.INFO:
-                    logger.info(message, timestamp)
-                elif level == LogLevel.WARNING:
-                    logger.warning(message, timestamp)
-                elif level == LogLevel.ERROR:
-                    logger.error(message, timestamp)
-                elif level == LogLevel.CRITICAL:
-                    logger.critical(message, timestamp)
-            except Exception as e:
-                failed_loggers.append((logger, str(e)))
-        
-        # Handle any failed loggers
-        if failed_loggers:
-            print("Warning: Some loggers failed:")
-            for logger, error in failed_loggers:
-                print(f"- {type(logger).__name__}: {error}")
-                self.remove_logger(logger)  # Remove failed logger to prevent future errors
+            # Work with a copy of loggers to avoid modification during iteration
+            loggers = self.loggers.copy()
+            
+            failed_loggers = []
+            for logger in loggers:
+                try:
+                    if level == LogLevel.DEBUG:
+                        logger.debug(message, timestamp)
+                    elif level == LogLevel.INFO:
+                        logger.info(message, timestamp)
+                    elif level == LogLevel.WARNING:
+                        logger.warning(message, timestamp)
+                    elif level == LogLevel.ERROR:
+                        logger.error(message, timestamp)
+                    elif level == LogLevel.CRITICAL:
+                        logger.critical(message, timestamp)
+                    else:
+                        # Handle unknown log level
+                        logger.info(f"[UNKNOWN LEVEL] {message}", timestamp)
+                except Exception as e:
+                    failed_loggers.append((logger, str(e)))
+            
+            # Handle any failed loggers while still holding the lock
+            if failed_loggers:
+                print("Warning: Some loggers failed:")
+                for logger, error in failed_loggers:
+                    print(f"- {type(logger).__name__}: {error}")
+                    # Remove failed logger to prevent future errors
+                    if logger in self.loggers:
+                        self.loggers.remove(logger)
     
     def debug(self, message: Any, timestamp: bool = True) -> None:
         """Log a debug message to all loggers"""
@@ -379,17 +408,49 @@ class FileLogger(BaseLogger):
             max_size_bytes: Maximum size of each log file
             backup_count: Number of backup files to keep
             encoding: File encoding
+            
+        Raises:
+            ValueError: If filepath is empty or invalid
+            PermissionError: If log directory can't be accessed or created
         """
-        self.base_filepath = Path(filepath)
+        if not filepath:
+            raise ValueError("Log filepath cannot be empty")
+            
+        # Sanitize and validate the file path
+        try:
+            # Convert to absolute path for security
+            sanitized_path = os.path.abspath(os.path.expanduser(filepath))
+            self.base_filepath = Path(sanitized_path)
+            
+            # Security check - prevent logging to sensitive directories
+            sensitive_dirs = ['/etc', '/bin', '/sbin', '/usr/bin', '/usr/sbin', '/boot']
+            for sensitive_dir in sensitive_dirs:
+                if sanitized_path.startswith(sensitive_dir + '/'):
+                    raise ValueError(f"Cannot write logs to system directory: {sensitive_dir}")
+                    
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Invalid log filepath: {e}")
+            
+        # Validate other parameters
+        if max_size_bytes <= 0:
+            max_size_bytes = 1024 * 1024  # Default to 1MB
+            
+        if backup_count < 0:
+            backup_count = 3  # Default to 3 backups
+            
         self.max_size_bytes = max_size_bytes
         self.backup_count = backup_count
-        self.encoding = encoding
+        self.encoding = encoding or 'utf-8'
         
         self.lock = threading.Lock()
-        self._create_log_directory()
-        self.current_filepath = self._get_timestamped_filepath()
         self.file: Optional[TextIO] = None
-        self._open_file()
+        
+        try:
+            self._create_log_directory()
+            self.current_filepath = self._get_timestamped_filepath()
+            self._open_file()
+        except (PermissionError, OSError) as e:
+            raise PermissionError(f"Cannot initialize log file: {e}")
     
     def _create_log_directory(self) -> None:
         """Create the directory for log files if it doesn't exist"""
@@ -418,21 +479,60 @@ class FileLogger(BaseLogger):
     def _cleanup_old_logs(self) -> None:
         """Remove old log files exceeding backup_count"""
         try:
-            pattern = f"{self.base_filepath.stem}.*{self.base_filepath.suffix}"
-            log_files = sorted(
-                self.base_filepath.parent.glob(pattern),
-                key=lambda x: x.stat().st_mtime,
-                reverse=True
-            )
+            # Validate path before glob operation
+            if not self.base_filepath.parent.is_dir():
+                print(f"Log directory does not exist: {self.base_filepath.parent}")
+                return
+                
+            # Sanitize the pattern to avoid potential issues
+            stem = str(self.base_filepath.stem).replace('*', '_').replace('?', '_')
+            suffix = str(self.base_filepath.suffix).replace('*', '_').replace('?', '_')
+            pattern = f"{stem}.*{suffix}"
+            
+            # Get all matching log files
+            try:
+                log_files = sorted(
+                    self.base_filepath.parent.glob(pattern),
+                    key=lambda x: x.stat().st_mtime,
+                    reverse=True
+                )
+            except PermissionError as e:
+                print(f"Permission error accessing log files: {e}")
+                return
+            except OSError as e:
+                print(f"OS error accessing log files: {e}")
+                return
             
             # Keep only backup_count files
-            for old_log in log_files[self.backup_count:]:
+            if self.backup_count < 0:
+                self.backup_count = 0
+                
+            files_to_delete = log_files[self.backup_count:] if len(log_files) > self.backup_count else []
+            for old_log in files_to_delete:
                 try:
+                    # Security check - ensure it's within the expected directory
+                    if old_log.parent.resolve() != self.base_filepath.parent.resolve():
+                        print(f"Security warning: Skipping file outside log directory: {old_log}")
+                        continue
+                        
+                    # Ensure it's a regular file before deleting
+                    if not old_log.is_file():
+                        print(f"Not a regular file, skipping: {old_log}")
+                        continue
+                        
                     old_log.unlink()
+                except PermissionError as e:
+                    print(f"Permission error removing old log {old_log}: {e}")
+                except OSError as e:
+                    print(f"OS error removing old log {old_log}: {e}")
                 except Exception as e:
-                    print(f"Error removing old log {old_log}: {e}")
+                    print(f"Unexpected error removing old log {old_log}: {e}")
+        except PermissionError as e:
+            print(f"Permission error during log cleanup: {e}")
+        except OSError as e:
+            print(f"OS error during log cleanup: {e}")
         except Exception as e:
-            print(f"Error during log cleanup: {e}")
+            print(f"Unexpected error during log cleanup: {e}")
     
     def _check_rotation(self) -> bool:
         """Check if we need to rotate to a new file"""
@@ -474,10 +574,27 @@ class FileLogger(BaseLogger):
                 if self.file is not None:
                     self.file.write(message + "\n")
                     self.file.flush()
-            except Exception as e:
-                print(f"Error writing to log file: {e}")
+            except IOError as e:
+                print(f"I/O error writing to log file: {e}")
                 # Try to recover by creating a new file
-                self._rotate_if_needed()
+                try:
+                    self._rotate_if_needed()
+                except Exception as inner_e:
+                    print(f"Failed to recover log file: {inner_e}")
+            except OSError as e:
+                print(f"OS error writing to log file: {e}")
+                # Try to recover by creating a new file
+                try:
+                    self._rotate_if_needed()
+                except Exception as inner_e:
+                    print(f"Failed to recover log file: {inner_e}")
+            except Exception as e:
+                print(f"Unexpected error writing to log file: {e}")
+                # Try to recover by creating a new file
+                try:
+                    self._rotate_if_needed()
+                except Exception as inner_e:
+                    print(f"Failed to recover log file: {inner_e}")
     
     def _log(self, level: LogLevel, message: Any, timestamp: bool = True) -> None:
         """Log a message to the file"""
