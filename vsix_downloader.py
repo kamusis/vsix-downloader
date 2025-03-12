@@ -284,25 +284,25 @@ class VSIXDownloader:
                 print(f"   Rating: {rating:.1f} ({rating_count:,} ratings)")
                 print(f"   {short_desc}")
             
-            print("\nEnter a number to select an extension, or 'c' to cancel.")
+            print("\nEnter a number to select an extension, or '/quit' or '/exit' to quit.")
             while True:
                 try:
                     try:
-                        choice = input(f"\nPlease choose an extension (1-{len(top_extensions)}) or 'c' to cancel [1]: ").lower()
-                        if choice == 'c':
+                        choice = input(f"\nPlease choose an extension (1-{len(top_extensions)}) or '/quit' or '/exit' to quit [1]: ").lower()
+                        if choice in ['/quit', '/exit']:
                             raise KeyboardInterrupt("User cancelled extension selection")
                         if not choice:  # Default to first option
                             choice = "1"
                         choice_idx = int(choice) - 1
                         if 0 <= choice_idx < len(top_extensions):
                             return top_extensions[choice_idx]  # Return (score, extension) tuple
-                        print(f"Please enter a number between 1 and {len(top_extensions)} or 'c' to cancel")
+                        print(f"Please enter a number between 1 and {len(top_extensions)} or '/quit' or '/exit' to quit")
                     except EOFError:
                         # Handle case where stdin is not available (e.g. in CI/CD or automated testing)
                         self.logger.info("Non-interactive environment detected, defaulting to first option")
                         return top_extensions[0]  # Default to first option
                 except ValueError:
-                    print("Please enter a valid number or 'c' to cancel")
+                    print("Please enter a valid number or '/quit' or '/exit' to quit")
         else:
             return top_extensions[0]  # Return (score, extension) tuple
 
@@ -524,45 +524,89 @@ def main():
         # Create output directory if it doesn't exist
         os.makedirs(args.output_dir, exist_ok=True)
         
-        # Get extension name from argument or prompt user
-        extension_name = args.extension_name
-        if not extension_name:
-            while True:
-                extension_name = input("\nEnter the name of the VS Code extension to download (or 'c' to cancel): ").strip().lower()
-                if extension_name == 'c':
-                    print("Operation cancelled.")
-                    return
-                if extension_name:
-                    break
-                print("Please enter a valid extension name.")
-        
         # Create downloader instance
         downloader = VSIXDownloader(logger)
         
-        try:
-            # Download the extension
-            output_file = downloader.download_extension(extension_name, args.output_dir)
-            print(f"\nExtension downloaded successfully to: {output_file}")
-        except KeyboardInterrupt as e:
-            if str(e) == "User cancelled extension selection":
-                print("\nOperation cancelled.")
-                return
-            if str(e) == "User cancelled download":
-                print("\nDownload cancelled.")
-                return
-            raise
-        except ValueError as e:
-            print(f"\nError: {e}")
-            return 1
-        except requests.RequestException as e:
-            print(f"\nNetwork error: {e}")
-            return 1
-        except OSError as e:
-            print(f"\nFile system error: {e}")
-            return 1
-        except Exception as e:
-            print(f"\nUnexpected error: {e}")
-            return 1
+        continue_downloading = True
+        while continue_downloading:
+            # Get extension name from argument or prompt user
+            extension_name = args.extension_name
+            if not extension_name:
+                while True:
+                    extension_name = input("\nEnter the name of the VS Code extension to download (or '/quit', '/exit' to quit): ").strip()
+                    if extension_name.lower() in ['/quit', '/exit']:
+                        print("\nThank you for using VSIX Downloader. Goodbye!")
+                        return 0
+                    if extension_name:
+                        break
+                    print("Please enter a valid extension name.")
+            
+            try:
+                # Download the extension
+                output_file = downloader.download_extension(extension_name, args.output_dir)
+                print(f"\nExtension downloaded successfully to: {output_file}")
+                
+                # Reset args.extension_name so it prompts for the next extension
+                args.extension_name = None
+                
+                # Ask for next extension name with a more friendly prompt
+                extension_name = input("\nEnter the name of another extension to download, or type '/quit' or '/exit' to finish: ").strip()
+                if extension_name.lower() in ['/quit', '/exit']:
+                    continue_downloading = False
+                elif not extension_name:
+                    # If empty input, prompt again in the next loop iteration
+                    args.extension_name = None
+                else:
+                    # Use the provided extension name in the next loop iteration
+                    args.extension_name = extension_name
+                
+            except KeyboardInterrupt as e:
+                if str(e) == "User cancelled extension selection":
+                    print("\nOperation cancelled.")
+                    return 0
+                if str(e) == "User cancelled download":
+                    print("\nDownload cancelled.")
+                    # Ask if user wants to try another extension
+                    while True:
+                        try_another = input("\nDo you want to try another extension? (y/n): ").strip().lower()
+                        if try_another in ['n', 'no', '/quit', '/exit']:
+                            continue_downloading = False
+                            break
+                        elif try_another in ['y', 'yes']:
+                            args.extension_name = None
+                            break
+                        else:
+                            print("Please enter 'y' or 'n'.")
+                    continue
+                raise
+            except ValueError as e:
+                print(f"\nError: {e}")
+                # Ask if user wants to try another extension
+                while True:
+                    try_another = input("\nDo you want to try another extension? (y/n): ").strip().lower()
+                    if try_another in ['n', 'no', '/quit', '/exit']:
+                        continue_downloading = False
+                        break
+                    elif try_another in ['y', 'yes']:
+                        args.extension_name = None
+                        break
+                    else:
+                        print("Please enter 'y' or 'n'.")
+                continue
+            except requests.RequestException as e:
+                print(f"\nNetwork error: {e}")
+                continue_downloading = False
+                return 1
+            except OSError as e:
+                print(f"\nFile system error: {e}")
+                continue_downloading = False
+                return 1
+            except Exception as e:
+                print(f"\nUnexpected error: {e}")
+                continue_downloading = False
+                return 1
+                
+        print("\nThank you for using VSIX Downloader. Goodbye!")
             
     except KeyboardInterrupt:
         print("\nOperation cancelled.")
