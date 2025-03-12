@@ -4,3 +4,4 @@ tqdm>=4.66.1        # Progress bar for downloads
 
 # Optional dependencies
 # pytest>=7.0.0     # For running tests
+pyinstaller>=6.0.0  # For compiler

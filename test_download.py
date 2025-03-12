@@ -5,8 +5,6 @@ Test script for the extension download functionality of VSIXDownloader.
 
 import sys
 import os
-import shutil
-from typing import Optional
 import requests
 from requests.exceptions import RequestException, Timeout
 
@@ -132,9 +130,9 @@ def main() -> int:
                 
                 # Skip the confirmation prompt
                 download_url = self.construct_download_url(
-                    extension_info["publisher_name"],
-                    extension_info["extension_id"],
-                    extension_info["version"]
+                    str(extension_info["publisher_name"]),
+                    str(extension_info["extension_id"]),
+                    str(extension_info["version"])
                 )
                 
                 # Continue with download logic

@@ -30,12 +30,14 @@ ENV/
 # IDE
 .idea/
 .vscode/
+.ropeproject
 *.swp
 *.swo
 .DS_Store
 
 # Project specific
 *.vsix
-search_result.json
 downloads/
+refs/
 CLAUDE.md
+search_result.json
