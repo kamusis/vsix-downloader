@@ -256,7 +256,7 @@ class VSIXDownloader:
             (self._score_extension(ext, extension_name), ext)
             for ext in extensions
         ]
-        scored_extensions.sort(reverse=True)  # Sort by score descending
+        scored_extensions.sort(key=lambda x: x[0], reverse=True)  # Sort by score descending
         
         total_results = len(extensions)
         print(f"\nFound {total_results} matching extensions (showing top 5 by relevance score)")
